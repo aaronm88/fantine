@@ -484,7 +484,7 @@ class OhioWaterScraper:
                     'system_principal_county_served': system_county
                 }
 
-                logger.info(f"Processing system {i+1}/{test_limit}: {system_name} ({system_id})")
+                logger.info(f"Processing system {i+1}/{len(systems)}: {system_name} ({system_id})")
 
                 # Get coliform results
                 coliform_results = await self.get_coliform_results(session, system_info)
