@@ -553,28 +553,28 @@ class TennesseeWaterScraper:
                     
                     for i, system_url in enumerate(system_links):
                         logger.info(f"Processing system {i+1}/{len(system_links)}: {system_url}")
-                    
-                    # Get system home page data
-                    system_data = await self.scrape_system_home_page(session, system_url)
-                    if not system_data:
-                        continue
-                    
-                    # Process ChemRad results if available
-                    if system_data.get('chemrad_results_link'):
-                        logger.info(f"Processing ChemRad results: {system_data['chemrad_results_link']}")
                         
-                        # Get sample data
-                        samples = await self.scrape_chemrad_results_summary(session, system_data['chemrad_results_link'])
+                        # Get system home page data
+                        system_data = await self.scrape_system_home_page(session, system_url)
+                        if not system_data:
+                            continue
                         
-                        # Process each sample
-                        for sample in samples:
-                            if sample.get('sample_url'):
-                                results = await self.scrape_chemrad_results_detail(session, sample['sample_url'], sample)
-                                self.results.extend(results)
-                                logger.info(f"Added {len(results)} ChemRad results for sample {sample['sample_number']}")
-                    
-                    # Add delay between systems
-                    await asyncio.sleep(1)
+                        # Process ChemRad results if available
+                        if system_data.get('chemrad_results_link'):
+                            logger.info(f"Processing ChemRad results: {system_data['chemrad_results_link']}")
+                            
+                            # Get sample data
+                            samples = await self.scrape_chemrad_results_summary(session, system_data['chemrad_results_link'])
+                            
+                            # Process each sample
+                            for sample in samples:
+                                if sample.get('sample_url'):
+                                    results = await self.scrape_chemrad_results_detail(session, sample['sample_url'], sample)
+                                    self.results.extend(results)
+                                    logger.info(f"Added {len(results)} ChemRad results for sample {sample['sample_number']}")
+                        
+                        # Add delay between systems
+                        await asyncio.sleep(1)
             else:
                 logger.info("No system links found, will generate test data")
         
