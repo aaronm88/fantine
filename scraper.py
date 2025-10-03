@@ -547,13 +547,12 @@ class TennesseeWaterScraper:
                 logger.error(f"Error fetching main page: {str(e)}")
                 logger.warning("Continuing with test data generation...")
             
-            # Step 2: Process each system (limit to first 5 for testing)
-            if system_links:
-                test_limit = min(5, len(system_links))
-                logger.info(f"Processing {test_limit} systems for testing...")
-                
-                for i, system_url in enumerate(system_links[:test_limit]):
-                    logger.info(f"Processing system {i+1}/{test_limit}: {system_url}")
+                # Step 2: Process each system
+                if system_links:
+                    logger.info(f"Processing {len(system_links)} systems...")
+                    
+                    for i, system_url in enumerate(system_links):
+                        logger.info(f"Processing system {i+1}/{len(system_links)}: {system_url}")
                     
                     # Get system home page data
                     system_data = await self.scrape_system_home_page(session, system_url)
@@ -588,10 +587,10 @@ class TennesseeWaterScraper:
         await self._save_results()
         logger.info(f"Scraping completed! Total results: {len(self.results)}")
     
-    async def _generate_test_data(self):
+    async def _generate_test_data(self, num_results=1000):
         """Generate test Tennessee water data for testing upload functionality"""
         test_results = []
-        for i in range(10):
+        for i in range(num_results):
             result = TennesseeWaterResult(
                 result_uuid=str(uuid4()),
                 state=self.state_abbrev,
@@ -698,7 +697,7 @@ def main():
     parser.add_argument('--max-pages', type=int, default=100, help='Maximum pages to scrape')
     parser.add_argument('--delay', type=float, default=1.0, help='Delay between requests in seconds')
     parser.add_argument('--output-format', choices=['json', 'txt'], default='json', help='Output format')
-    parser.add_argument('--scraper-type', choices=['general', 'tennessee-water'], default='general', 
+    parser.add_argument('--scraper-type', choices=['general', 'tennessee-water', 'ohio-water'], default='general', 
                        help='Type of scraper to run')
     
     args = parser.parse_args()
@@ -707,6 +706,20 @@ def main():
     if args.scraper_type == 'tennessee-water':
         logger.info("Running Tennessee Water System scraper...")
         scraper = TennesseeWaterScraper()
+        try:
+            asyncio.run(scraper.run())
+        except KeyboardInterrupt:
+            logger.info("Scraping interrupted by user")
+        except Exception as e:
+            logger.error(f"Scraping failed: {str(e)}")
+            sys.exit(1)
+        return
+    
+    # Check if running Ohio water scraper
+    if args.scraper_type == 'ohio-water':
+        logger.info("Running Ohio Water System scraper...")
+        from ohio_scraper import OhioWaterScraper
+        scraper = OhioWaterScraper()
         try:
             asyncio.run(scraper.run())
         except KeyboardInterrupt:
