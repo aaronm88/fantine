@@ -544,6 +544,14 @@ class OhioWaterScraper:
             comprehensive_file = await self.combine_all_batches()
             if comprehensive_file:
                 logger.info(f"Comprehensive file created: {comprehensive_file}")
+                
+                # Clean up progress file since scraping is completely done
+                try:
+                    if os.path.exists(self.resume_file):
+                        os.unlink(self.resume_file)
+                        logger.info(f"Deleted progress file: {self.resume_file}")
+                except Exception as e:
+                    logger.error(f"Failed to delete progress file: {str(e)}")
             
             logger.info(f"Scraping completed! Processed {processed_count} systems across {batch_count} batches")
 
@@ -726,6 +734,23 @@ class OhioWaterScraper:
         
         # Upload comprehensive file to Spaces
         await self._upload_to_spaces(comprehensive_file)
+        
+        # Clean up batch files after successful upload
+        logger.info("Cleaning up batch files...")
+        deleted_files = 0
+        total_space_freed = 0
+        
+        for batch_file in batch_files:
+            try:
+                file_size = batch_file.stat().st_size
+                batch_file.unlink()  # Delete the file
+                deleted_files += 1
+                total_space_freed += file_size
+                logger.info(f"Deleted: {batch_file.name} ({file_size} bytes)")
+            except Exception as e:
+                logger.error(f"Failed to delete {batch_file}: {str(e)}")
+        
+        logger.info(f"Cleanup complete: deleted {deleted_files} batch files, freed {total_space_freed:,} bytes")
         
         return comprehensive_file
 
