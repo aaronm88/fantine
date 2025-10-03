@@ -12,6 +12,7 @@ import os
 import signal
 import sys
 import time
+import boto3
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
@@ -180,7 +181,7 @@ class FantineScraper:
             return text.strip()
     
     async def _save_results(self):
-        """Save results to file"""
+        """Save results to file and upload to DigitalOcean Spaces"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         if self.config.output_format.lower() == "json":
@@ -199,7 +200,43 @@ class FantineScraper:
                     f.write("-" * 80 + "\n")
         
         logger.info(f"Results saved to {output_file}")
+        
+        # Upload to DigitalOcean Spaces
+        await self._upload_to_spaces(output_file)
+        
         return output_file
+    
+    async def _upload_to_spaces(self, file_path: Path):
+        """Upload file to DigitalOcean Spaces"""
+        try:
+            # Get credentials from environment variables
+            spaces_key = os.getenv('DO_SPACES_KEY')
+            spaces_secret = os.getenv('DO_SPACES_SECRET')
+            spaces_endpoint = os.getenv('DO_SPACES_ENDPOINT', 'https://nyc3.digitaloceanspaces.com')
+            spaces_bucket = os.getenv('DO_SPACES_BUCKET', 'fantine-bucket')
+            
+            if not spaces_key or not spaces_secret:
+                logger.warning("DigitalOcean Spaces credentials not found. Skipping upload.")
+                return
+            
+            # Create S3 client for DigitalOcean Spaces
+            session = boto3.session.Session()
+            client = session.client('s3',
+                                  region_name='nyc3',
+                                  endpoint_url=spaces_endpoint,
+                                  aws_access_key_id=spaces_key,
+                                  aws_secret_access_key=spaces_secret)
+            
+            # Upload file
+            key = f"scraped-data/{file_path.name}"
+            client.upload_file(str(file_path), spaces_bucket, key)
+            
+            # Generate public URL
+            public_url = f"{spaces_endpoint}/{spaces_bucket}/{key}"
+            logger.info(f"File uploaded to DigitalOcean Spaces: {public_url}")
+            
+        except Exception as e:
+            logger.error(f"Failed to upload to DigitalOcean Spaces: {str(e)}")
     
     async def run(self):
         """Main scraping loop"""

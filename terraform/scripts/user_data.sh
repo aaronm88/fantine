@@ -72,7 +72,11 @@ Type=simple
 User=root
 WorkingDirectory=/opt/fantine
 Environment=PATH=/opt/fantine/venv/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/fantine/venv/bin/python scraper.py
+Environment=DO_SPACES_KEY=DO801PDT7VMHU4TUK8QY
+Environment=DO_SPACES_SECRET=GlXR28EAyw1HhW0rbqTPO2rSzDxSzMbRpcf65PePNU8
+Environment=DO_SPACES_BUCKET=fantine-bucket
+Environment=DO_SPACES_ENDPOINT=https://fantine-bucket.nyc3.digitaloceanspaces.com
+ExecStart=/opt/fantine/venv/bin/python scraper.py --urls https://www.amwater.com/ --max-pages 10 --delay 1
 Restart=on-failure
 RestartSec=10
 
