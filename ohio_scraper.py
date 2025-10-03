@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import urllib.parse
+import pickle
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -94,6 +95,11 @@ class OhioWaterScraper:
         self.sample_types = ['BB', 'CN', 'CO', 'DU', 'FB', 'FP', 'GR', 'MR', 'MS', 
                             'PE', 'RI', 'RL', 'RP', 'RT', 'SB', 'SL', 'ST', 'TG']
 
+        # Resume capability
+        self.processed_systems = set()  # Track processed system IDs to avoid duplicates
+        self.batch_size = 50  # Save/upload every 50 systems processed
+        self.resume_file = "/opt/fantine/progress.pkl"
+        
         # Create output directory
         self.output_dir = Path("/opt/fantine/results")
         self.output_dir.mkdir(exist_ok=True)
@@ -439,8 +445,13 @@ class OhioWaterScraper:
         """Main scraping process"""
         logger.info("Starting Ohio Water System scraper...")
 
+        # Try to load previous progress
+        progress_loaded = self.load_progress()
+        if progress_loaded:
+            logger.info(f"Resuming from previous run. Already processed {len(self.processed_systems)} systems.")
+
         connector = aiohttp.TCPConnector(limit=10)
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=60)  # Increased timeout
         
         # Create session with cookie jar to maintain session state
         cookie_jar = aiohttp.CookieJar()
@@ -465,6 +476,8 @@ class OhioWaterScraper:
 
             # Step 3: Process each system
             logger.info(f"Processing {len(systems)} systems...")
+            batch_count = 0
+            processed_count = 0
 
             for i, system in enumerate(systems):
                 if 'NUMBER0' not in system:
@@ -475,6 +488,11 @@ class OhioWaterScraper:
                 system_status = system.get('ACTIVITY_STATUS_CD')
                 system_type = system.get('D_PWS_FED_TYPE_CD', '').strip()
                 system_county = system.get('D_PRIN_CNTY_SVD_NM', '').strip()
+                
+                # Skip if already processed (for resume capability)
+                if system_id in self.processed_systems:
+                    logger.info(f"Skipping already processed system {i+1}/{len(systems)}: {system_name} ({system_id})")
+                    continue
 
                 system_info = {
                     'system_id': system_id,
@@ -486,22 +504,45 @@ class OhioWaterScraper:
 
                 logger.info(f"Processing system {i+1}/{len(systems)}: {system_name} ({system_id})")
 
-                # Get coliform results
-                coliform_results = await self.get_coliform_results(session, system_info)
-                self.results.extend(coliform_results)
-                logger.info(f"Added {len(coliform_results)} coliform results")
+                try:
+                    # Get coliform results
+                    coliform_results = await self.get_coliform_results(session, system_info)
+                    self.results.extend(coliform_results)
+                    logger.info(f"Added {len(coliform_results)} coliform results")
 
-                # Get chemical results
-                chemical_results = await self.get_chemical_results(session, system_info)
-                self.results.extend(chemical_results)
-                logger.info(f"Added {len(chemical_results)} chemical results")
+                    # Get chemical results
+                    chemical_results = await self.get_chemical_results(session, system_info)
+                    self.results.extend(chemical_results)
+                    logger.info(f"Added {len(chemical_results)} chemical results")
 
-                # Add delay between systems
-                await asyncio.sleep(1)
+                    # Mark system as processed
+                    self.processed_systems.add(system_id)
+                    processed_count += 1
 
-            # Save results
+                    # Save progress every batch_size systems
+                    if processed_count % self.batch_size == 0:
+                        batch_count += 1
+                        logger.info(f"Completed {processed_count} systems, saving batch {batch_count}...")
+                        await self.save_batch_results(batch_count)
+                        logger.info(f"Batch {batch_count} saved successfully")
+
+                    # Add delay between systems
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing system {system_id}: {str(e)}")
+                    # Continue with next system even if this one failed
+                    continue
+
+            # Save any remaining results as final batch
+            if processed_count % self.batch_size != 0:
+                batch_count += 1
+                logger.info(f"Saving final batch {batch_count} with remaining {processed_count % self.batch_size} systems...")
+                await self.save_batch_results(batch_count)
+            
+            # Also save final complete results
             await self._save_results()
-            logger.info(f"Scraping completed! Total results: {len(self.results)}")
+            logger.info(f"Scraping completed! Total results: {len(self.results)} across {batch_count} batches")
 
     async def _save_results(self):
         """Save Ohio water results to file and upload to Spaces"""
@@ -569,6 +610,53 @@ class OhioWaterScraper:
             logger.error(f"Failed to upload to DigitalOcean Spaces: {str(e)}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
+
+    def save_progress(self):
+        """Save current progress to disk"""
+        progress_data = {
+            'processed_systems': list(self.processed_systems),
+            'results': [asdict(result) for result in self.results]
+        }
+        with open(self.resume_file, 'wb') as f:
+            pickle.dump(progress_data, f)
+        logger.info(f"Progress saved: {len(self.processed_systems)} systems processed, {len(self.results)} results collected")
+
+    def load_progress(self):
+        """Load previous progress if available"""
+        if os.path.exists(self.resume_file):
+            try:
+                with open(self.resume_file, 'rb') as f:
+                    progress_data = pickle.load(f)
+                self.processed_systems = set(progress_data.get('processed_systems', []))
+                # Reconstruct results from dict data
+                results_data = progress_data.get('results', [])
+                self.results = [OhioWaterResult(**result_data) for result_data in results_data]
+                logger.info(f"Progress loaded: {len(self.processed_systems)} systems processed, {len(self.results)} results collected")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to load progress: {str(e)}")
+        return False
+
+    async def save_batch_results(self, batch_num: int):
+        """Save and upload current results in batches"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = self.output_dir / f"ohio_water_results_batch_{batch_num:04d}_{timestamp}.json"
+
+        # Convert results to dict format
+        results_data = [asdict(result) for result in self.results]
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(results_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Batch {batch_num} saved to {output_file} with {len(results_data)} results")
+
+        # Upload to DigitalOcean Spaces
+        await self._upload_to_spaces(output_file)
+        
+        # Also save progress
+        self.save_progress()
+
+        return output_file
 
 async def main():
     """Main entry point for Ohio scraper"""
