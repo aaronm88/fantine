@@ -43,7 +43,8 @@ mkdir -p /opt/fantine
 cd /opt/fantine
 
 # Clone the repository
-git clone ${repo_url} .
+# Using GH_TOKEN for authentication
+git clone https://${github_token}@github.com/${repo_url#https://github.com/} . || { echo "Failed to clone repository"; exit 1; }
 
 # Set up Python environment
 python3 -m venv venv
