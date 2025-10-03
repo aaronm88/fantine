@@ -463,11 +463,10 @@ class OhioWaterScraper:
                 logger.error("No systems collected. Cannot proceed.")
                 return
 
-            # Step 3: Process each system (limit to first 10 for testing)
-            test_limit = min(10, len(systems))
-            logger.info(f"Processing {test_limit} systems for testing...")
+            # Step 3: Process each system
+            logger.info(f"Processing {len(systems)} systems...")
 
-            for i, system in enumerate(systems[:test_limit]):
+            for i, system in enumerate(systems):
                 if 'NUMBER0' not in system:
                     continue
                     
