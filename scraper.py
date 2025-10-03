@@ -519,7 +519,7 @@ class TennesseeWaterScraper:
         
         # Configure headers to avoid 403 errors
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPad; CPU OS 12_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate',
@@ -650,6 +650,8 @@ class TennesseeWaterScraper:
             spaces_endpoint = os.getenv('DO_SPACES_ENDPOINT', 'https://nyc3.digitaloceanspaces.com')
             spaces_bucket = os.getenv('DO_SPACES_BUCKET', 'fantine-bucket')
             
+            logger.info(f"Uploading to Spaces - Key: {spaces_key[:10]}..., Secret: {spaces_secret[:10]}..., Bucket: {spaces_bucket}")
+            
             if not spaces_key or not spaces_secret:
                 logger.warning("DigitalOcean Spaces credentials not found. Skipping upload.")
                 return
@@ -664,14 +666,29 @@ class TennesseeWaterScraper:
             
             # Upload file
             key = f"tennessee-water-data/{file_path.name}"
+            logger.info(f"Uploading file {file_path} to key: {key}")
             client.upload_file(str(file_path), spaces_bucket, key)
             
             # Generate public URL
             public_url = f"{spaces_endpoint}/{spaces_bucket}/{key}"
             logger.info(f"File uploaded to DigitalOcean Spaces: {public_url}")
             
+            # Verify upload by listing objects
+            try:
+                response = client.list_objects_v2(Bucket=spaces_bucket, Prefix='tennessee-water-data/')
+                if 'Contents' in response:
+                    logger.info(f"Verified upload - found {len(response['Contents'])} files in tennessee-water-data/")
+                    for obj in response['Contents']:
+                        logger.info(f"  - {obj['Key']} ({obj['Size']} bytes)")
+                else:
+                    logger.warning("Upload verification failed - no files found in tennessee-water-data/")
+            except Exception as verify_error:
+                logger.error(f"Upload verification failed: {str(verify_error)}")
+            
         except Exception as e:
             logger.error(f"Failed to upload to DigitalOcean Spaces: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
 def main():
     """Main entry point"""
