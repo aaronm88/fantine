@@ -1,0 +1,208 @@
+name: Deploy Fantine Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      max_lifetime_hours:
+        description: 'Maximum lifetime in hours'
+        required: true
+        default: '24'
+        type: string
+      target_urls:
+        description: 'Comma-separated list of target URLs'
+        required: true
+        type: string
+      max_pages:
+        description: 'Maximum pages to scrape'
+        required: true
+        default: '100'
+        type: string
+
+  repository_dispatch:
+    types: [cleanup_completed]
+
+env:
+  TF_VERSION: '1.5.0'
+  DO_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+  DO_SPACES_ACCESS_KEY: ${{ secrets.DO_SPACES_ACCESS_KEY }}
+  DO_SPACES_SECRET_KEY: ${{ secrets.DO_SPACES_SECRET_KEY }}
+  DO_SPACES_BUCKET: ${{ secrets.DO_SPACES_BUCKET }}
+  DO_SPACES_ENDPOINT: ${{ secrets.DO_SPACES_ENDPOINT }}
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Configure Terraform backend
+      run: |
+        cat > terraform/backend.tf << EOF
+        terraform {
+          backend "s3" {
+            endpoint                    = "${{ env.DO_SPACES_ENDPOINT }}"
+            bucket                      = "${{ env.DO_SPACES_BUCKET }}"
+            key                         = "terraform/state/${{ github.event.inputs.environment }}.tfstate"
+            region                      = "us-east-1"
+            skip_credentials_validation = true
+            skip_metadata_api_check     = true
+            force_path_style            = true
+          }
+        }
+        EOF
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+
+    - name: Terraform Plan
+      working-directory: ./terraform
+      run: |
+        terraform plan \
+          -var="environment=${{ github.event.inputs.environment }}" \
+          -var="max_lifetime_hours=${{ github.event.inputs.max_lifetime_hours }}" \
+          -var="scraping_config.target_urls=[${{ github.event.inputs.target_urls }}]" \
+          -var="scraping_config.max_pages=${{ github.event.inputs.max_pages }}" \
+          -var="ssh_key_name=${{ secrets.DO_SSH_KEY_NAME }}" \
+          -var="gh_token=${{ secrets.GH_TOKEN }}" \
+          -var="repo_url=${{ github.repositoryUrl }}" \
+          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+          -out=tfplan
+
+    - name: Terraform Apply
+      working-directory: ./terraform
+      run: terraform apply tfplan
+
+    - name: Get Droplet Info
+      id: droplet-info
+      working-directory: ./terraform
+      run: |
+        DROPLET_IP=$(terraform output -raw droplet_ip)
+        DROPLET_ID=$(terraform output -raw droplet_id)
+        echo "droplet_ip=$DROPLET_IP" >> $GITHUB_OUTPUT
+        echo "droplet_id=$DROPLET_ID" >> $GITHUB_OUTPUT
+
+    - name: Wait for Droplet Ready
+      run: |
+        echo "Waiting for droplet to be ready..."
+        for i in {1..30}; do
+          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${{ steps.droplet-info.outputs.droplet_ip }} "echo 'Droplet ready'"; then
+            echo "Droplet is ready!"
+            break
+          fi
+          echo "Attempt $i: Droplet not ready yet, waiting..."
+          sleep 30
+        done
+
+    - name: Check Scraper Status
+      run: |
+        curl -f http://${{ steps.droplet-info.outputs.droplet_ip }}:8080/status || echo "Status endpoint not ready yet"
+
+    - name: Create Cleanup Workflow
+      run: |
+        # Schedule cleanup after max lifetime
+        gh workflow run cleanup.yml \
+          --ref ${{ github.ref }} \
+          -f environment=${{ github.event.inputs.environment }} \
+          -f droplet_id=${{ steps.droplet-info.outputs.droplet_id }} \
+          --delay ${{ github.event.inputs.max_lifetime_hours }}h || echo "Cleanup workflow not found"
+
+    - name: Comment on PR/Issue
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `🚀 **Fantine Scraper Deployed Successfully!**
+            
+            **Environment:** ${{ github.event.inputs.environment }}
+            **Droplet IP:** ${{ steps.droplet-info.outputs.droplet_ip }}
+            **Droplet ID:** ${{ steps.droplet-info.outputs.droplet_id }}
+            **Max Lifetime:** ${{ github.event.inputs.max_lifetime_hours }} hours
+            
+            **Status:** http://${{ steps.droplet-info.outputs.droplet_ip }}:8080/status
+            
+            The droplet will automatically terminate after ${{ github.event.inputs.max_lifetime_hours }} hours or when the scraping job completes.`
+          })
+
+  cleanup:
+    if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Configure Terraform backend
+      run: |
+        cat > terraform/backend.tf << EOF
+        terraform {
+          backend "s3" {
+            endpoint                    = "${{ env.DO_SPACES_ENDPOINT }}"
+            bucket                      = "${{ env.DO_SPACES_BUCKET }}"
+            key                         = "terraform/state/${{ github.event.inputs.environment || 'dev' }}.tfstate"
+            region                      = "us-east-1"
+            skip_credentials_validation = true
+            skip_metadata_api_check     = true
+            force_path_style            = true
+          }
+        }
+        EOF
+
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+
+    - name: Run Cleanup Script
+      if: github.event.inputs.droplet_id
+      run: |
+        DROPLET_IP=$(doctl compute droplet get ${{ github.event.inputs.droplet_id }} --format IPAddress --no-header)
+        ssh -o StrictHostKeyChecking=no root@$DROPLET_IP "/opt/fantine/cleanup.sh" || echo "Cleanup script failed"
+
+    - name: Terraform Destroy
+      working-directory: ./terraform
+      run: |
+        terraform destroy \
+          -var="environment=${{ github.event.inputs.environment || 'dev' }}" \
+          -var="enabled=false" \
+          -var="ssh_key_name=${{ secrets.DO_SSH_KEY_NAME }}" \
+          -var="gh_token=${{ secrets.GH_TOKEN }}" \
+          -var="repo_url=${{ github.repositoryUrl }}" \
+          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+          -auto-approve
+
+    - name: Cleanup Notification
+      run: |
+        echo "🧹 **Fantine Scraper Cleaned Up Successfully!**
+        
+        **Environment:** ${{ github.event.inputs.environment || 'dev' }}
+        **Droplet ID:** ${{ github.event.inputs.droplet_id }}
+        **Cleanup Time:** $(date)
+        
+        All resources have been destroyed and cleaned up."
