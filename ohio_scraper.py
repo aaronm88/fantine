@@ -540,9 +540,12 @@ class OhioWaterScraper:
                 logger.info(f"Saving final batch {batch_count} with remaining {processed_count % self.batch_size} systems...")
                 await self.save_batch_results(batch_count)
             
-            # Also save final complete results
-            await self._save_results()
-            logger.info(f"Scraping completed! Total results: {len(self.results)} across {batch_count} batches")
+            # Combine all batch files into one comprehensive file
+            comprehensive_file = await self.combine_all_batches()
+            if comprehensive_file:
+                logger.info(f"Comprehensive file created: {comprehensive_file}")
+            
+            logger.info(f"Scraping completed! Processed {processed_count} systems across {batch_count} batches")
 
     async def _save_results(self):
         """Save Ohio water results to file and upload to Spaces"""
@@ -615,11 +618,12 @@ class OhioWaterScraper:
         """Save current progress to disk"""
         progress_data = {
             'processed_systems': list(self.processed_systems),
-            'results': [asdict(result) for result in self.results]
+            'results': [asdict(result) for result in self.results],
+            'total_results_collected': len(self.processed_systems)  # Keep track of total systems processed
         }
         with open(self.resume_file, 'wb') as f:
             pickle.dump(progress_data, f)
-        logger.info(f"Progress saved: {len(self.processed_systems)} systems processed, {len(self.results)} results collected")
+        logger.info(f"Progress saved: {len(self.processed_systems)} systems processed, {len(self.results)} results in memory")
 
     def load_progress(self):
         """Load previous progress if available"""
@@ -628,10 +632,10 @@ class OhioWaterScraper:
                 with open(self.resume_file, 'rb') as f:
                     progress_data = pickle.load(f)
                 self.processed_systems = set(progress_data.get('processed_systems', []))
-                # Reconstruct results from dict data
+                # Reconstruct results from dict data (may be empty if memory was cleared)
                 results_data = progress_data.get('results', [])
                 self.results = [OhioWaterResult(**result_data) for result_data in results_data]
-                logger.info(f"Progress loaded: {len(self.processed_systems)} systems processed, {len(self.results)} results collected")
+                logger.info(f"Progress loaded: {len(self.processed_systems)} systems processed, {len(self.results)} results in memory")
                 return True
             except Exception as e:
                 logger.error(f"Failed to load progress: {str(e)}")
@@ -653,10 +657,77 @@ class OhioWaterScraper:
         # Upload to DigitalOcean Spaces
         await self._upload_to_spaces(output_file)
         
+        # Clear memory after successful upload to prevent memory buildup
+        self.results.clear()
+        logger.info(f"Cleared memory after batch {batch_num}. Results count reset to {len(self.results)}")
+        
         # Also save progress
         self.save_progress()
 
         return output_file
+
+    async def combine_all_batches(self):
+        """Combine all batch files into one comprehensive file"""
+        logger.info("Combining all batch files into one comprehensive file...")
+        
+        # Find all batch files in the results directory
+        batch_files = list(self.output_dir.glob("ohio_water_results_batch_*_*.json"))
+        batch_files.sort()  # Sort by filename to ensure proper order
+        
+        if not batch_files:
+            logger.warning("No batch files found to combine")
+            return None
+            
+        logger.info(f"Found {len(batch_files)} batch files to combine")
+        
+        all_results = []
+        total_size = 0
+        
+        for batch_file in batch_files:
+            try:
+                with open(batch_file, 'r', encoding='utf-8') as f:
+                    batch_data = json.load(f)
+                
+                batch_count = len(batch_data) if isinstance(batch_data, list) else 1
+                all_results.extend(batch_data)
+                total_size += batch_file.stat().st_size
+                
+                logger.info(f"Loaded {batch_count} results from {batch_file.name}")
+                
+            except Exception as e:
+                logger.error(f"Error reading batch file {batch_file}: {str(e)}")
+                continue
+        
+        if not all_results:
+            logger.warning("No data found in batch files")
+            return None
+            
+        # Create comprehensive file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        comprehensive_file = self.output_dir / f"ohio_water_results_comprehensive_{timestamp}.json"
+        
+        # Add metadata
+        comprehensive_data = {
+            "metadata": {
+                "total_records": len(all_results),
+                "batch_files_combined": len(batch_files),
+                "total_size_bytes": total_size,
+                "generated_at": self.timestamp_utc,
+                "scraper_version": "Ohio Water Scraper v2.0",
+                "batch_files": [bf.name for bf in batch_files]
+            },
+            "results": all_results
+        }
+        
+        with open(comprehensive_file, 'w', encoding='utf-8') as f:
+            json.dump(comprehensive_data, f, indent=2, ensure_ascii=False)
+            
+        logger.info(f"Created comprehensive file: {comprehensive_file} with {len(all_results)} total records")
+        
+        # Upload comprehensive file to Spaces
+        await self._upload_to_spaces(comprehensive_file)
+        
+        return comprehensive_file
 
 async def main():
     """Main entry point for Ohio scraper"""
