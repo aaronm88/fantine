@@ -115,20 +115,26 @@ class OhioWaterScraper:
                     logger.error(f"Failed to get initial page: {response.status}")
                     return None
                 
-                # Extract XSRF token from cookies
-                cookies = response.headers.get('Set-Cookie', '')
+                # Extract XSRF token from cookies - handle multiple Set-Cookie headers
                 xsrf_token = None
                 
-                if 'XSRF-TOKEN' in cookies:
-                    start = cookies.find('XSRF-TOKEN=') + len('XSRF-TOKEN=')
-                    end = cookies.find(';', start)
-                    xsrf_token = cookies[start:end] if end > -1 else cookies[start:]
+                # Check all Set-Cookie headers
+                for cookie_header in response.headers.getall('Set-Cookie', []):
+                    cookie_str = cookie_header
+                    if 'XSRF-TOKEN' in cookie_str:
+                        start = cookie_str.find('XSRF-TOKEN=') + len('XSRF-TOKEN=')
+                        end = cookie_str.find(';', start)
+                        xsrf_token = cookie_str[start:end] if end > -1 else cookie_str[start:]
+                        break
                 
                 if xsrf_token:
                     self.headers['X-XSRF-TOKEN'] = xsrf_token
-                    logger.info("XSRF token obtained successfully")
+                    logger.info(f"XSRF token obtained successfully: {xsrf_token[:20]}...")
                 else:
                     logger.warning("XSRF token not found in response cookies")
+                    # Log all cookies for debugging
+                    all_cookies = response.headers.getall('Set-Cookie', [])
+                    logger.info(f"All cookies received: {all_cookies}")
                 
                 return xsrf_token
                 
@@ -435,13 +441,21 @@ class OhioWaterScraper:
 
         connector = aiohttp.TCPConnector(limit=10)
         timeout = aiohttp.ClientTimeout(total=30)
-
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=self.headers) as session:
+        
+        # Create session with cookie jar to maintain session state
+        cookie_jar = aiohttp.CookieJar()
+        
+        async with aiohttp.ClientSession(
+            connector=connector, 
+            timeout=timeout, 
+            headers=self.headers,
+            cookie_jar=cookie_jar
+        ) as session:
             # Step 1: Get XSRF token
             xsrf_token = await self.get_xsrf_token(session)
             if not xsrf_token:
-                logger.error("Failed to get XSRF token. Cannot proceed.")
-                return
+                logger.warning("XSRF token not found, but continuing anyway (some APIs work without it)")
+                # Don't return, continue without XSRF token
 
             # Step 2: Collect all systems
             systems = await self.collect_all_systems(session)
