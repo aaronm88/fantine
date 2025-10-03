@@ -13,11 +13,16 @@ import signal
 import sys
 import time
 import boto3
-from datetime import datetime
+import pandas as pd
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any
 import argparse
 from dataclasses import dataclass, asdict
+from uuid import uuid4
+from io import StringIO
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +56,34 @@ class ScrapedData:
     status_code: int
     response_time: float
     metadata: Dict[str, Any]
+
+@dataclass
+class TennesseeWaterResult:
+    """Structure for Tennessee water system data"""
+    result_uuid: str
+    state: str
+    pwsid: str
+    system_name: str
+    unix_timestamp: str
+    timestamp_utc: str
+    result_id: str
+    result_lab_sample_number: str
+    result_sample_type: str
+    result_sample_collection_timestamp: str
+    result_sample_point: str
+    result_sample_location: str
+    result_presence_absence_indicator: str
+    result_laboratory: str
+    result_analyte_code: str
+    result_analyte_name: str
+    result_method_code: str
+    result_less_than_indicator: str
+    result_level_type: str
+    result_reporting_level: str
+    result_concentration_level: str
+    result_monitoring_period_begin_date: str
+    result_monitoring_period_end_date: str
+    result_url: str
 
 class FantineScraper:
     """Main scraper class"""
@@ -306,6 +339,279 @@ def load_config_from_env() -> ScrapingConfig:
         max_concurrent=int(os.getenv('SCRAPING_MAX_CONCURRENT', '5')),
     )
 
+class TennesseeWaterScraper:
+    """Tennessee Water System Data Scraper"""
+    
+    def __init__(self):
+        self.state_abbrev = 'TN'
+        self.results = []
+        self.unix_timestamp = str(int(datetime.now().astimezone(timezone.utc).timestamp() * 1000))
+        self.timestamp_utc = str(datetime.now().astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
+        self.timestamp_for_file = str(datetime.now().astimezone(timezone.utc).strftime('%Y%m%d_%H%M'))
+        
+        # Tennessee-specific URLs
+        self.systems_search_page_url = 'https://dataviewers.tdec.tn.gov/DWW/JSP/'
+        self.systems_root_url = 'https://dataviewers.tdec.tn.gov/DWW/JSP/'
+        
+        # Create output directory
+        self.output_dir = Path("/opt/fantine/results")
+        self.output_dir.mkdir(exist_ok=True)
+    
+    async def scrape_system_links(self, session: aiohttp.ClientSession, response_text: str) -> List[str]:
+        """Extract system links from the main page"""
+        soup = BeautifulSoup(response_text, 'html.parser')
+        table = soup.find('table', {'id': 'AutoNumber7'})
+        if not table:
+            return []
+        
+        links = []
+        for link in table.find_all('a', href=True):
+            href = link['href'].strip()
+            if href and "Fact" not in href:
+                full_url = self.systems_root_url + href
+                links.append(full_url)
+        
+        return links
+    
+    async def scrape_system_home_page(self, session: aiohttp.ClientSession, url: str) -> Dict[str, str]:
+        """Scrape system home page to get TCR and ChemRad links"""
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to fetch system home page: {url} (status: {response.status})")
+                    return {}
+                
+                text = await response.text()
+                soup = BeautifulSoup(text, 'html.parser')
+                
+                # Find TCR results link
+                tcr_link = soup.find('a', href=lambda x: x and x.startswith('TcrSampleResults'))
+                tcr_results_link = self.systems_root_url + tcr_link['href'].strip() if tcr_link else None
+                
+                # Find ChemRad results link
+                chemrad_link = soup.find('a', href=lambda x: x and x.startswith('NonTcrSamples'))
+                chemrad_results_link = self.systems_root_url + chemrad_link['href'].strip() if chemrad_link else None
+                
+                return {
+                    'tcr_results_link': tcr_results_link,
+                    'chemrad_results_link': chemrad_results_link,
+                    'system_url': url
+                }
+        except Exception as e:
+            logger.error(f"Error scraping system home page {url}: {str(e)}")
+            return {}
+    
+    async def scrape_chemrad_results_summary(self, session: aiohttp.ClientSession, url: str) -> List[Dict[str, Any]]:
+        """Scrape ChemRad results summary page"""
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to fetch ChemRad summary: {url} (status: {response.status})")
+                    return []
+                
+                text = await response.text()
+                soup = BeautifulSoup(text, 'html.parser')
+                
+                # Parse sample table
+                sample_table = soup.find('table', {'id': 'AutoNumber8'})
+                if not sample_table:
+                    return []
+                
+                # Convert table to pandas DataFrame
+                table_html = str(sample_table)
+                df = pd.read_html(StringIO(table_html))[0].iloc[1:]
+                
+                # Find sample links
+                sample_links = []
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if 'SingleResults' in href or 'sample_number' in href:
+                        sample_links.append(href)
+                
+                samples = []
+                for i, link in enumerate(sample_links):
+                    if i < len(df):
+                        # Extract sample number from URL
+                        sample_number_match = re.search(r'(?<=sample_number=)(.*)(?=&collection_date)', link)
+                        sample_number = sample_number_match.group(0) if sample_number_match else f"sample_{i}"
+                        
+                        samples.append({
+                            'sample_number': sample_number,
+                            'sample_type': df.iloc[i, 1] if len(df.columns) > 1 else 'unknown',
+                            'sample_collection_datetime': df.iloc[i, 2] if len(df.columns) > 2 else 'unknown',
+                            'sample_sampling_point': df.iloc[i, 3] if len(df.columns) > 3 else 'unknown',
+                            'sample_location': df.iloc[i, 4] if len(df.columns) > 4 else 'unknown',
+                            'sample_laboratory': df.iloc[i, 5] if len(df.columns) > 5 else 'unknown',
+                            'sample_url': url + link if not link.startswith('http') else link
+                        })
+                
+                return samples
+        except Exception as e:
+            logger.error(f"Error scraping ChemRad summary {url}: {str(e)}")
+            return []
+    
+    async def scrape_chemrad_results_detail(self, session: aiohttp.ClientSession, url: str, sample_data: Dict[str, Any]) -> List[TennesseeWaterResult]:
+        """Scrape detailed ChemRad results"""
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to fetch ChemRad detail: {url} (status: {response.status})")
+                    return []
+                
+                text = await response.text()
+                soup = BeautifulSoup(text, 'html.parser')
+                
+                # Parse system info
+                system_info_table = soup.find('table', {'id': 'AutoNumber4'})
+                if not system_info_table:
+                    return []
+                
+                system_df = pd.read_html(StringIO(str(system_info_table)))[1]
+                vals1, vals2 = list(system_df.iloc[:, 1]), list(system_df.iloc[:, 3])
+                vals = [*vals1, *vals2]
+                
+                # Parse ChemRad results
+                results_table = soup.find('table', {'id': 'AutoNumber8'})
+                if not results_table:
+                    return []
+                
+                results_df = pd.read_html(StringIO(str(results_table)))[0].iloc[1:]
+                results_df = results_df.astype(str).fillna('nan')
+                
+                results = []
+                for i in range(len(results_df)):
+                    result = TennesseeWaterResult(
+                        result_uuid=str(uuid4()),
+                        state=self.state_abbrev,
+                        pwsid=vals[0] if len(vals) > 0 else 'unknown',
+                        system_name=vals[1] if len(vals) > 1 else 'unknown',
+                        unix_timestamp=self.unix_timestamp,
+                        timestamp_utc=self.timestamp_utc,
+                        result_id=str(results_df.index[i]),
+                        result_lab_sample_number=sample_data['sample_number'],
+                        result_sample_type=sample_data['sample_type'],
+                        result_sample_collection_timestamp=sample_data['sample_collection_datetime'],
+                        result_sample_point=sample_data['sample_sampling_point'],
+                        result_sample_location=sample_data['sample_location'] if sample_data['sample_location'] != 'nan' else 'unknown',
+                        result_presence_absence_indicator='',
+                        result_laboratory=sample_data['sample_laboratory'],
+                        result_analyte_code=results_df.iloc[i, 0] if len(results_df.columns) > 0 else '',
+                        result_analyte_name=results_df.iloc[i, 1] if len(results_df.columns) > 1 else '',
+                        result_method_code=results_df.iloc[i, 2] if len(results_df.columns) > 2 else '',
+                        result_less_than_indicator=results_df.iloc[i, 3] if len(results_df.columns) > 3 else '',
+                        result_level_type=results_df.iloc[i, 4] if len(results_df.columns) > 4 else '',
+                        result_reporting_level=results_df.iloc[i, 5] if len(results_df.columns) > 5 else '',
+                        result_concentration_level=results_df.iloc[i, 6] if len(results_df.columns) > 6 else '',
+                        result_monitoring_period_begin_date=results_df.iloc[i, 7] if len(results_df.columns) > 7 else '',
+                        result_monitoring_period_end_date=results_df.iloc[i, 8] if len(results_df.columns) > 8 else '',
+                        result_url=url
+                    )
+                    results.append(result)
+                
+                return results
+        except Exception as e:
+            logger.error(f"Error scraping ChemRad detail {url}: {str(e)}")
+            return []
+    
+    async def run(self):
+        """Main scraping process"""
+        logger.info("Starting Tennessee Water System scraper...")
+        
+        connector = aiohttp.TCPConnector(limit=10)
+        timeout = aiohttp.ClientTimeout(total=30)
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            # Step 1: Get system links from main page
+            logger.info(f"Fetching system links from: {self.systems_search_page_url}")
+            async with session.get(self.systems_search_page_url) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to fetch main page: {response.status}")
+                    return
+                
+                text = await response.text()
+                system_links = await self.scrape_system_links(session, text)
+                logger.info(f"Found {len(system_links)} system links")
+            
+            # Step 2: Process each system
+            for i, system_url in enumerate(system_links[:10]):  # Limit to first 10 for testing
+                logger.info(f"Processing system {i+1}/{min(len(system_links), 10)}: {system_url}")
+                
+                # Get system home page data
+                system_data = await self.scrape_system_home_page(session, system_url)
+                if not system_data:
+                    continue
+                
+                # Process ChemRad results if available
+                if system_data.get('chemrad_results_link'):
+                    logger.info(f"Processing ChemRad results: {system_data['chemrad_results_link']}")
+                    
+                    # Get sample data
+                    samples = await self.scrape_chemrad_results_summary(session, system_data['chemrad_results_link'])
+                    
+                    # Process each sample
+                    for sample in samples:
+                        if sample.get('sample_url'):
+                            results = await self.scrape_chemrad_results_detail(session, sample['sample_url'], sample)
+                            self.results.extend(results)
+                            logger.info(f"Added {len(results)} ChemRad results for sample {sample['sample_number']}")
+                
+                # Add delay between systems
+                await asyncio.sleep(1)
+        
+        # Save results
+        await self._save_results()
+        logger.info(f"Scraping completed! Total results: {len(self.results)}")
+    
+    async def _save_results(self):
+        """Save Tennessee water results to file and upload to Spaces"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = self.output_dir / f"tennessee_water_results_{timestamp}.json"
+        
+        # Convert results to dict format
+        results_data = [asdict(result) for result in self.results]
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(results_data, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Results saved to {output_file}")
+        
+        # Upload to DigitalOcean Spaces
+        await self._upload_to_spaces(output_file)
+        
+        return output_file
+    
+    async def _upload_to_spaces(self, file_path: Path):
+        """Upload file to DigitalOcean Spaces"""
+        try:
+            # Get credentials from environment variables
+            spaces_key = os.getenv('DO_SPACES_KEY')
+            spaces_secret = os.getenv('DO_SPACES_SECRET')
+            spaces_endpoint = os.getenv('DO_SPACES_ENDPOINT', 'https://nyc3.digitaloceanspaces.com')
+            spaces_bucket = os.getenv('DO_SPACES_BUCKET', 'fantine-bucket')
+            
+            if not spaces_key or not spaces_secret:
+                logger.warning("DigitalOcean Spaces credentials not found. Skipping upload.")
+                return
+            
+            # Create S3 client for DigitalOcean Spaces
+            session = boto3.session.Session()
+            client = session.client('s3',
+                                  region_name='nyc3',
+                                  endpoint_url=spaces_endpoint,
+                                  aws_access_key_id=spaces_key,
+                                  aws_secret_access_key=spaces_secret)
+            
+            # Upload file
+            key = f"tennessee-water-data/{file_path.name}"
+            client.upload_file(str(file_path), spaces_bucket, key)
+            
+            # Generate public URL
+            public_url = f"{spaces_endpoint}/{spaces_bucket}/{key}"
+            logger.info(f"File uploaded to DigitalOcean Spaces: {public_url}")
+            
+        except Exception as e:
+            logger.error(f"Failed to upload to DigitalOcean Spaces: {str(e)}")
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Fantine Web Scraper')
@@ -314,10 +620,25 @@ def main():
     parser.add_argument('--max-pages', type=int, default=100, help='Maximum pages to scrape')
     parser.add_argument('--delay', type=float, default=1.0, help='Delay between requests in seconds')
     parser.add_argument('--output-format', choices=['json', 'txt'], default='json', help='Output format')
+    parser.add_argument('--scraper-type', choices=['general', 'tennessee-water'], default='general', 
+                       help='Type of scraper to run')
     
     args = parser.parse_args()
     
-    # Load configuration
+    # Check if running Tennessee water scraper
+    if args.scraper_type == 'tennessee-water':
+        logger.info("Running Tennessee Water System scraper...")
+        scraper = TennesseeWaterScraper()
+        try:
+            asyncio.run(scraper.run())
+        except KeyboardInterrupt:
+            logger.info("Scraping interrupted by user")
+        except Exception as e:
+            logger.error(f"Scraping failed: {str(e)}")
+            sys.exit(1)
+        return
+    
+    # Load configuration for general scraper
     if args.config_file and os.path.exists(args.config_file):
         with open(args.config_file, 'r') as f:
             config_data = json.load(f)
@@ -336,7 +657,7 @@ def main():
         logger.error("No target URLs specified!")
         sys.exit(1)
     
-    # Run scraper
+    # Run general scraper
     scraper = FantineScraper(config)
     
     try:
