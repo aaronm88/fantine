@@ -100,6 +100,10 @@ class OhioWaterScraper:
         self.batch_size = 50  # Save/upload every 50 systems processed
         self.resume_file = "/opt/fantine/progress.pkl"
         
+        # Run tracking
+        self.run_id = str(datetime.now().astimezone(timezone.utc).strftime('%Y%m%d_%H%M%S'))
+        self.session_started_at = self.timestamp_utc
+        
         # Create output directory
         self.output_dir = Path("/opt/fantine/results")
         self.output_dir.mkdir(exist_ok=True)
@@ -627,11 +631,14 @@ class OhioWaterScraper:
         progress_data = {
             'processed_systems': list(self.processed_systems),
             'results': [asdict(result) for result in self.results],
-            'total_results_collected': len(self.processed_systems)  # Keep track of total systems processed
+            'total_results_collected': len(self.processed_systems),  # Keep track of total systems processed
+            'run_id': self.run_id,
+            'session_started_at': self.session_started_at,
+            'last_saved_at': self.timestamp_utc
         }
         with open(self.resume_file, 'wb') as f:
             pickle.dump(progress_data, f)
-        logger.info(f"Progress saved: {len(self.processed_systems)} systems processed, {len(self.results)} results in memory")
+        logger.info(f"Progress saved: {len(self.processed_systems)} systems processed, {len(self.results)} results in memory (Run ID: {self.run_id})")
 
     def load_progress(self):
         """Load previous progress if available"""
@@ -643,7 +650,14 @@ class OhioWaterScraper:
                 # Reconstruct results from dict data (may be empty if memory was cleared)
                 results_data = progress_data.get('results', [])
                 self.results = [OhioWaterResult(**result_data) for result_data in results_data]
+                
+                # Extract run information
+                previous_run_id = progress_data.get('run_id', 'unknown')
+                session_started = progress_data.get('session_started_at', 'unknown')
+                last_saved = progress_data.get('last_saved_at', 'unknown')
+                
                 logger.info(f"Progress loaded: {len(self.processed_systems)} systems processed, {len(self.results)} results in memory")
+                logger.info(f"Previous run ID: {previous_run_id} | Session: {session_started} | Last saved: {last_saved}")
                 return True
             except Exception as e:
                 logger.error(f"Failed to load progress: {str(e)}")
@@ -720,6 +734,8 @@ class OhioWaterScraper:
                 "total_records": len(all_results),
                 "batch_files_combined": len(batch_files),
                 "total_size_bytes": total_size,
+                "run_id": self.run_id,
+                "session_started_at": self.session_started_at,
                 "generated_at": self.timestamp_utc,
                 "scraper_version": "Ohio Water Scraper v2.0",
                 "batch_files": [bf.name for bf in batch_files]
