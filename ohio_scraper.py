@@ -455,7 +455,7 @@ class OhioWaterScraper:
             logger.info(f"Resuming from previous run. Already processed {len(self.processed_systems)} systems.")
 
         connector = aiohttp.TCPConnector(limit=10)
-        timeout = aiohttp.ClientTimeout(total=60)  # Increased timeout
+        timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_read=None)  # No timeout
         
         # Create session with cookie jar to maintain session state
         cookie_jar = aiohttp.CookieJar()
