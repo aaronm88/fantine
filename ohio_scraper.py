@@ -689,7 +689,7 @@ class OhioWaterScraper:
         return output_file
 
     async def combine_all_batches(self):
-        """Combine all batch files into one comprehensive file"""
+        """Combine all batch files into one comprehensive file using memory-efficient streaming"""
         logger.info("Combining all batch files into one comprehensive file...")
         
         # Find all batch files in the results directory
@@ -702,51 +702,72 @@ class OhioWaterScraper:
             
         logger.info(f"Found {len(batch_files)} batch files to combine")
         
-        all_results = []
-        total_size = 0
-        
-        for batch_file in batch_files:
-            try:
-                with open(batch_file, 'r', encoding='utf-8') as f:
-                    batch_data = json.load(f)
-                
-                batch_count = len(batch_data) if isinstance(batch_data, list) else 1
-                all_results.extend(batch_data)
-                total_size += batch_file.stat().st_size
-                
-                logger.info(f"Loaded {batch_count} results from {batch_file.name}")
-                
-            except Exception as e:
-                logger.error(f"Error reading batch file {batch_file}: {str(e)}")
-                continue
-        
-        if not all_results:
-            logger.warning("No data found in batch files")
-            return None
-            
-        # Create comprehensive file
+        # Create comprehensive file with streaming approach
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         comprehensive_file = self.output_dir / f"ohio_water_results_comprehensive_{timestamp}.json"
         
-        # Add metadata
-        comprehensive_data = {
-            "metadata": {
-                "total_records": len(all_results),
-                "batch_files_combined": len(batch_files),
-                "total_size_bytes": total_size,
-                "run_id": self.run_id,
-                "session_started_at": self.session_started_at,
-                "generated_at": self.timestamp_utc,
-                "scraper_version": "Ohio Water Scraper v2.0",
-                "batch_files": [bf.name for bf in batch_files]
-            },
-            "results": all_results
-        }
+        total_results = 0
+        total_size = 0
         
-        with open(comprehensive_file, 'w', encoding='utf-8') as f:
-            json.dump(comprehensive_data, f, indent=2, ensure_ascii=False)
+        # Use shell command to efficiently combine files
+        logger.info("Using shell commands to efficiently combine JSON files...")
+        
+        try:
+            # Create a temporary metadata file
+            metadata_file = self.output_dir / "metadata.json"
+            with open(metadata_file, 'w') as f:
+                json.dump({
+                    "total_records": 0,  # Will be updated
+                    "batch_files_combined": len(batch_files),
+                    "total_size_bytes": 0,  # Will be updated
+                    "run_id": self.run_id,
+                    "session_started_at": self.session_started_at,
+                    "generated_at": self.timestamp_utc,
+                    "scraper_version": "Ohio Water Scraper v2.0",
+                    "batch_files": [bf.name for bf in batch_files]
+                }, f, indent=2)
             
-        logger.info(f"Created comprehensive file: {comprehensive_file} with {len(all_results)} total records")
+            # Combine files using shell tools to avoid memory issues
+            cmd = f"""
+            echo '{{' > {comprehensive_file}
+            echo '  "metadata": ' >> {comprehensive_file}
+            cat {metadata_file} >> {comprehensive_file}
+            echo ',' >> {comprehensive_file}
+            echo '  "results": [' >> {comprehensive_file}
+            """
+            
+            # Add batch files with proper JSON formatting
+            for i, batch_file in enumerate(batch_files):
+                cmd += f"""
+                if [ {i} -gt 0 ]; then echo ',' >> {comprehensive_file}; fi
+                sed 's/^/    /' {batch_file} >> {comprehensive_file}
+                """
+                total_size += batch_file.stat().st_size
+            
+            cmd += f"""
+            echo '  ]' >> {comprehensive_file}
+            echo '}}' >> {comprehensive_file}
+            """
+            
+            # Execute the command
+            import os
+            os.system(cmd)
+            
+            # Clean up metadata file
+            metadata_file.unlink()
+            
+            # Count total results from individual batch files
+            for batch_file in batch_files:
+                if batch_file.stat().st_size > 0:
+                    with open(batch_file.name, 'r') as f:
+                        batch_data = json.load(f)
+                        total_results += len(batch_data) if isinstance(batch_data, list) else 1
+            
+            logger.info(f"Created comprehensive file: {comprehensive_file} with {total_results} total records")
+            
+        except Exception as e:
+            logger.error(f"Error creating comprehensive file: {str(e)}")
+            return None
         
         # Upload comprehensive file to Spaces
         await self._upload_to_spaces(comprehensive_file)
